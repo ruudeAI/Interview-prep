@@ -4,7 +4,7 @@ interview_prep_generator.py
 ===========================
 Main CLI entry point for the Interview Prep Guide Generator.
 Orchestrates CLI parsing, document loading, AI generation, and PDF building.
-Supports a secure demo mode for testing without real candidate files.
+Supports a secure demo mode for testing without real candidate files or API keys.
 """
 
 import argparse
@@ -34,7 +34,7 @@ def get_api_key():
     print("|  No GEMINI_API_KEY found in environment.    |")
     print("|  Provide a key or set it in a .env file.    |")
     print("+---------------------------------------------+")
-    key = input("  [Key] Enter your Gemini API key: ").strip()
+    key = input("  [Key] Enter your Gemini API key (press Enter to skip): ").strip()
     return key
 
 def check_privacy_consent(provider, yes_flag):
@@ -149,6 +149,7 @@ def main():
     ruc_text = ""
     candidate_name = args.candidate_name
     companies = []
+    use_mock_qa = False
 
     if args.demo:
         print("  [Warning] DEMO MODE ACTIVE")
@@ -232,15 +233,24 @@ def main():
     if args.provider == "gemini":
         api_key = get_api_key()
         if not api_key:
-            print("  [Error] Gemini API key is missing. Cannot proceed using 'gemini' provider.")
-            print("  Set GEMINI_API_KEY in a .env file or run with '--provider local' for offline mode.")
-            sys.exit(1)
-        try:
-            client = genai.Client(api_key=api_key)
-            print("  [Client] Gemini client initialized successfully.\n")
-        except Exception as e:
-            print(f"  [Error] Initializing Gemini Client failed: {e}")
-            sys.exit(1)
+            if args.demo:
+                print("  [Info] No Gemini API key found. Using preset mock data for demo generation.")
+                use_mock_qa = True
+            else:
+                print("  [Error] Gemini API key is missing. Cannot proceed using 'gemini' provider.")
+                print("  Set GEMINI_API_KEY in a .env file or run with '--provider local' for offline mode.")
+                sys.exit(1)
+        else:
+            try:
+                client = genai.Client(api_key=api_key)
+                print("  [Client] Gemini client initialized successfully.\n")
+            except Exception as e:
+                if args.demo:
+                    print(f"  [Warning] Initializing Gemini Client failed: {e}. Using preset mock data.")
+                    use_mock_qa = True
+                else:
+                    print(f"  [Error] Initializing Gemini Client failed: {e}")
+                    sys.exit(1)
 
     # ── Process each company ──
     generated_files = []
@@ -253,24 +263,17 @@ def main():
 
         try:
             # Step 1: Question sourcing
-            if client:
+            questions_text = ""
+            if client and not use_mock_qa:
                 try:
                     questions_text = ai_provider.fetch_interview_questions(client, company, role)
                 except Exception as e:
                     print(f"  [Warning] Search grounding failed: {e}")
                     print("  [Fallback] Sourcing standard questions as a fallback ...")
-                    questions_text = textwrap.dedent(f"""\
-                        [Technical] What is the difference between IDS and IPS?
-                        [Technical] How do you secure a web application?
-                        [Technical] Can you describe the difference between symmetric and asymmetric encryption?
-                        [Technical] What is DNS spoofing and how do you prevent it?
-                        [Behavioral] Describe a time you handled a critical incident under pressure.
-                        [Behavioral] Tell me about a time you had to explain a complex technical issue to a non-technical stakeholder.
-                        [Situational] What would you do if you detected an active ransomware attack on a critical server?
-                        [Company-Specific] Why do you want to work at {company} as a {role}?
-                    """)
-            else:
-                print("  [Info] Sourcing standard cybersecurity interview questions offline ...")
+            
+            if not questions_text:
+                if not use_mock_qa:
+                    print("  [Info] Sourcing standard cybersecurity interview questions offline ...")
                 questions_text = textwrap.dedent(f"""\
                     [Technical] What is the difference between IDS and IPS?
                     [Technical] How do you secure a web application?
@@ -283,18 +286,56 @@ def main():
                 """)
 
             # Step 2: Answer tailored generation and secure JSON parsing
-            qa_pairs = ai_provider.generate_tailored_answers(
-                client=client,
-                company=company,
-                role=role,
-                questions_text=questions_text,
-                resume_text=resume_text,
-                ruc_text=ruc_text,
-                candidate_name=candidate_name,
-                provider=args.provider,
-                local_endpoint=args.local_endpoint,
-                local_model=args.local_model,
-            )
+            qa_pairs = []
+            if use_mock_qa:
+                print("  [Info] Generating mock tailored answers for Demo ...")
+                qa_pairs = [
+                    {
+                        "category": "Technical",
+                        "question": "What is the difference between IDS and IPS?",
+                        "answer": "Situation: At CloudCorp, we monitored traffic anomalies.\nTask: Differentiate detection vs prevention.\nAction: Configured Snort in detection mode (IDS) to alert on malicious traffic, and inline mode (IPS) to block known attack signatures.\nResult: Blocked 99% of perimeter scans and logged alerts for custom analysis.",
+                        "key_terms": "IDS, IPS, Snort, Network Security"
+                    },
+                    {
+                        "category": "Behavioral",
+                        "question": "Describe a time you handled a critical incident under pressure.",
+                        "answer": "Situation: A phishing alert was triggered indicating potential credential harvesting.\nTask: Contain the breach and verify compromise.\nAction: Checked logs in Splunk, isolated the target host, and revoked user credentials.\nResult: Resolved within 15 minutes, preventing data exfiltration.",
+                        "key_terms": "Incident Response, Phishing, Splunk, Containment"
+                    }
+                ]
+            else:
+                try:
+                    qa_pairs = ai_provider.generate_tailored_answers(
+                        client=client,
+                        company=company,
+                        role=role,
+                        questions_text=questions_text,
+                        resume_text=resume_text,
+                        ruc_text=ruc_text,
+                        candidate_name=candidate_name,
+                        provider=args.provider,
+                        local_endpoint=args.local_endpoint,
+                        local_model=args.local_model,
+                    )
+                except Exception as e:
+                    if args.demo:
+                        print(f"  [Warning] AI generation failed ({e}). Falling back to demo mock data ...")
+                        qa_pairs = [
+                            {
+                                "category": "Technical",
+                                "question": "What is the difference between IDS and IPS?",
+                                "answer": "Situation: At CloudCorp, we monitored traffic anomalies.\nTask: Differentiate detection vs prevention.\nAction: Configured Snort in detection mode (IDS) to alert on malicious traffic, and inline mode (IPS) to block known attack signatures.\nResult: Blocked 99% of perimeter scans and logged alerts for custom analysis.",
+                                "key_terms": "IDS, IPS, Snort, Network Security"
+                            },
+                            {
+                                "category": "Behavioral",
+                                "question": "Describe a time you handled a critical incident under pressure.",
+                                "answer": "Situation: A phishing alert was triggered indicating potential credential harvesting.\nTask: Contain the breach and verify compromise.\nAction: Checked logs in Splunk, isolated the target host, and revoked user credentials.\nResult: Resolved within 15 minutes, preventing data exfiltration.",
+                                "key_terms": "Incident Response, Phishing, Splunk, Containment"
+                            }
+                        ]
+                    else:
+                        raise
 
             if not qa_pairs:
                 print(f"  [Warning] No Q&A pairs could be structured for {company}. Skipping PDF generation.")
